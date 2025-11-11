@@ -1,0 +1,230 @@
+#include <Servo.h>
+#include <LiquidCrystal_I2C.h>
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+Servo servos[4];
+const uint8_t sensorPins[] = {A0, A1, A2, A3};
+const uint8_t servoPins[] = {3, 5, 6, 10};
+
+const uint8_t recordBtn = 8;
+const uint8_t playBtn = 9;
+
+bool recording = false;
+bool playing = false;
+bool playbackLoop = false;
+
+bool recordPressed = false;
+bool playPressed = false;
+
+unsigned long lastRecordTime = 0;
+const uint16_t recordInterval = 50;   // Faster sampling (20 steps/sec)
+const uint16_t maxSteps = 250;        // Safe for Uno (≈1.6 KB RAM)
+uint8_t recordedAngles[4][maxSteps];
+uint16_t stepCount = 0;
+uint16_t playbackStep = 0;
+
+uint8_t currentPos[4] = {90, 90, 90, 90};
+uint8_t stableAngle[4] = {90, 90, 90, 90};
+
+unsigned long lastDebounceTimeRecord = 0;
+unsigned long lastDebounceTimePlay = 0;
+const unsigned long debounceDelay = 300;
+
+const uint8_t noiseThreshold = 5;     // Ignore tiny ADC fluctuations
+const float smoothingFactor = 0.2;    // Low-pass filter smoothing
+
+void setup() {
+  Serial.begin(9600);
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.print("Robotic Arm Ready");
+  delay(2000);
+  lcd.clear();
+  lcd.print("No Operation");
+
+  for (uint8_t i = 0; i < 4; i++) {
+    servos[i].attach(servoPins[i]);
+    servos[i].write(currentPos[i]);
+  }
+
+  pinMode(recordBtn, INPUT_PULLUP);
+  pinMode(playBtn, INPUT_PULLUP);
+  Serial.println("System Ready...");
+}
+
+void loop() {
+  handleButtons();
+
+  if (recording)
+    recordMotion();
+  else if (playing)
+    playbackMotion();
+  else
+    manualControl();
+}
+
+// ---------------------- BUTTON HANDLING ----------------------
+
+void handleButtons() {
+  if (digitalRead(recordBtn) == LOW) {
+    if (!recordPressed && (millis() - lastDebounceTimeRecord > debounceDelay)) {
+      recordPressed = true;
+      toggleRecording();
+      lastDebounceTimeRecord = millis();
+    }
+  } else recordPressed = false;
+
+  if (digitalRead(playBtn) == LOW) {
+    if (!playPressed && (millis() - lastDebounceTimePlay > debounceDelay)) {
+      playPressed = true;
+      togglePlayback();
+      lastDebounceTimePlay = millis();
+    }
+  } else playPressed = false;
+}
+
+// ---------------------- MANUAL CONTROL ----------------------
+
+void manualControl() {
+  bool movement = false;
+
+  for (uint8_t i = 0; i < 4; i++) {
+    analogRead(sensorPins[i]); // Dummy read for ADC stabilization
+    long sum = 0;
+    for (uint8_t j = 0; j < 5; j++) {
+      sum += analogRead(sensorPins[i]);
+      delayMicroseconds(150);
+    }
+
+    float avg = sum / 5.0;
+    uint8_t rawTarget = map(avg, 0, 1023, 0, 180);
+    stableAngle[i] = stableAngle[i] + smoothingFactor * (rawTarget - stableAngle[i]);
+
+    if (abs(stableAngle[i] - currentPos[i]) > noiseThreshold) {
+      movement = true;
+      currentPos[i] = stableAngle[i];
+      servos[i].write(currentPos[i]);
+    }
+  }
+
+  lcd.setCursor(0, 0);
+  if (movement)
+    lcd.print("Manual Control ");
+  else
+    lcd.print("No Operation   ");
+}
+
+// ---------------------- RECORD MOTION ----------------------
+
+void recordMotion() {
+  for (uint8_t i = 0; i < 4; i++) {
+    analogRead(sensorPins[i]);
+    long sum = 0;
+    for (uint8_t j = 0; j < 5; j++) {
+      sum += analogRead(sensorPins[i]);
+      delayMicroseconds(150);
+    }
+
+    float avg = sum / 5.0;
+    uint8_t rawTarget = map(avg, 0, 1023, 0, 180);
+    stableAngle[i] = stableAngle[i] + smoothingFactor * (rawTarget - stableAngle[i]);
+
+    if (abs(stableAngle[i] - currentPos[i]) > noiseThreshold) {
+      currentPos[i] = stableAngle[i];
+      servos[i].write(currentPos[i]);
+    }
+  }
+
+  if (millis() - lastRecordTime > recordInterval && stepCount < maxSteps) {
+    for (uint8_t i = 0; i < 4; i++) recordedAngles[i][stepCount] = currentPos[i];
+    stepCount++;
+    lastRecordTime = millis();
+  }
+
+  lcd.setCursor(0, 0);
+  lcd.print("Recording...   ");
+  lcd.setCursor(0, 1);
+  lcd.print("Steps: ");
+  lcd.print(stepCount);
+}
+
+// ---------------------- PLAYBACK ----------------------
+
+void playbackMotion() {
+  if (playbackStep < stepCount) {
+    for (uint8_t i = 0; i < 4; i++) {
+      servos[i].write(recordedAngles[i][playbackStep]);
+    }
+    lcd.setCursor(0, 0);
+    lcd.print("Playing...     ");
+    lcd.setCursor(0, 1);
+    lcd.print("Step ");
+    lcd.print(playbackStep + 1);
+    lcd.print("/");
+    lcd.print(stepCount);
+    playbackStep++;
+    delay(recordInterval);
+  } else {
+    if (playbackLoop) playbackStep = 0;
+    else stopPlayback();
+  }
+}
+
+// ---------------------- RECORD / PLAYBACK TOGGLES ----------------------
+
+void toggleRecording() {
+  if (!recording && !playing) startRecording();
+  else if (recording) stopRecording();
+}
+
+void togglePlayback() {
+  if (!recording && !playing && stepCount > 0) startPlayback();
+  else if (playing) stopPlayback();
+}
+
+// ---------------------- RECORDING CONTROL ----------------------
+
+void startRecording() {
+  recording = true;
+  playing = false;
+  playbackLoop = false;
+  stepCount = 0;
+  lcd.clear();
+  lcd.print("Recording...");
+  Serial.println("Recording started...");
+}
+
+void stopRecording() {
+  recording = false;
+  lcd.clear();
+  lcd.print("Record Done!");
+  Serial.println("Recording stopped...");
+  delay(1000);
+  lcd.clear();
+  lcd.print("No Operation");
+}
+
+// ---------------------- PLAYBACK CONTROL ----------------------
+
+void startPlayback() {
+  playbackStep = 0;
+  playing = true;
+  playbackLoop = true;
+  recording = false;
+  lcd.clear();
+  lcd.print("Playing...");
+  Serial.println("Playback started...");
+}
+
+void stopPlayback() {
+  playing = false;
+  playbackLoop = false;
+  lcd.clear();
+  lcd.print("Playback Stopped");
+  Serial.println("Playback stopped...");
+  delay(1000);
+  lcd.clear();
+  lcd.print("No Operation");
+}
