@@ -13,3 +13,7 @@ Side View
 Top View
 
 <img width="479" height="432" alt="image" src="https://github.com/user-attachments/assets/b5ab602d-5ce1-4720-ac76-065639468ec8" />
+
+Circuit Diagram
+
+<img width="1478" height="901" alt="image" src="https://github.com/user-attachments/assets/4efcfc5f-506a-4b1d-ad97-8310219f59bb" />
